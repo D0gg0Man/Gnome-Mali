@@ -25,3 +25,5 @@ To do:
 *Simplify pipeline further
 
 *Remove heavy logging (presently stored in /tmp ) 
+
+*Theming and comfort fixes, OSK fixes?
