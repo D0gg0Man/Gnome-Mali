@@ -10,7 +10,7 @@ set -e
 BACKUP_DIR="/var/lib/gnome-mali/backups"
 STATE_FILE="/var/lib/gnome-mali/installed"
 EGL_LIB_DIR="/usr/lib/aarch64-linux-gnu"
-VENDOR_DIR="/usr/share/glvnd/egl_vendor.d"
+HYBRIS_PLATFORM_DIR="/usr/lib/aarch64-linux-gnu/libhybris"
 
 echo "=== GNOME Mali Session Uninstaller ==="
 
@@ -40,29 +40,20 @@ restore_or_remove() {
 }
 
 # -----------------------------------------------------------------------------
-# Step 1 — Ensure phosh vendor is active before we change anything
+# Step 1 — Restore patched libhybris EGL to original
 # -----------------------------------------------------------------------------
-echo "[1/8] Restoring phosh EGL vendor..."
-if [ -f /usr/local/bin/gnome-mali-vendor-off ]; then
-    /usr/local/bin/gnome-mali-vendor-off 2>/dev/null || true
-else
-    # Manual restore
-    [ -f "$EGL_LIB_DIR/libEGL_hybris_wrapper_phosh.so" ] && \
-        cp "$EGL_LIB_DIR/libEGL_hybris_wrapper_phosh.so" /tmp/_phosh_restore.so && \
-        mv /tmp/_phosh_restore.so "$EGL_LIB_DIR/libEGL_hybris_wrapper.so"
-    rm -f "$VENDOR_DIR/05_hybris_wrapper.json"
-    rm -f "$VENDOR_DIR/10_libhybris.json"
-    [ -f "$VENDOR_DIR/10_libhybris.json.real" ] && \
-        ln -sf "$VENDOR_DIR/10_libhybris.json.real" "$VENDOR_DIR/10_libhybris.json"
-    rm -f "$VENDOR_DIR/50_mesa.json"
-    [ -f "$VENDOR_DIR/50_mesa.json.real" ] && \
-        ln -sf "$VENDOR_DIR/50_mesa.json.real" "$VENDOR_DIR/50_mesa.json"
-fi
+echo "[1/6] Restoring libhybris EGL..."
+restore_or_remove "$EGL_LIB_DIR/libEGL_libhybris.so.0.0.0"
+ldconfig
 
 # -----------------------------------------------------------------------------
 # Step 2 — Stop and disable systemd service
 # -----------------------------------------------------------------------------
-echo "[2/8] Removing systemd service..."
+echo "[2/6] Removing systemd service..."
+systemctl stop gnome-mali-boot.service 2>/dev/null || true
+systemctl disable gnome-mali-boot.service 2>/dev/null || true
+rm -f /etc/systemd/system/gnome-mali-boot.service
+# Also clean up old vendor-restore service if present
 systemctl stop gnome-mali-vendor-restore.service 2>/dev/null || true
 systemctl disable gnome-mali-vendor-restore.service 2>/dev/null || true
 rm -f /etc/systemd/system/gnome-mali-vendor-restore.service
@@ -71,66 +62,60 @@ systemctl daemon-reload
 # -----------------------------------------------------------------------------
 # Step 3 — Restore greetd config
 # -----------------------------------------------------------------------------
-echo "[3/8] Restoring greetd config..."
+echo "[3/6] Restoring greetd config..."
 restore_or_remove /etc/greetd/phrog.toml
-restore_or_remove /usr/libexec/phrog-greetd-vendor-wrapper
+# Remove vendor wrapper if present from old install
+rm -f /usr/libexec/phrog-greetd-vendor-wrapper
 
 # -----------------------------------------------------------------------------
 # Step 4 — Remove session files
 # -----------------------------------------------------------------------------
-echo "[4/8] Removing session files..."
+echo "[4/6] Removing session files..."
 rm -f /usr/share/wayland-sessions/gnome-mali.desktop
 restore_or_remove /usr/libexec/gnome-mali-session
 
 # -----------------------------------------------------------------------------
-# Step 5 — Remove vendor swap scripts
+# Step 5 — Remove installed libraries
 # -----------------------------------------------------------------------------
-echo "[5/8] Removing vendor swap scripts..."
+echo "[5/6] Removing installed libraries..."
+
+# Remove drmadapter platform
+rm -f "$HYBRIS_PLATFORM_DIR/eglplatform_drmadapter.so"
+
+# Remove shim libraries
+rm -f /usr/local/lib/drm_shim.so
+rm -f /usr/local/lib/wlegl_server.so
+rm -f /usr/local/lib/vulkan_x11_stub.so
+
+# Remove old vendor wrapper libraries if present
+rm -f "$EGL_LIB_DIR/libEGL_hybris_wrapper_gnome.so"
+rm -f "$EGL_LIB_DIR/libEGL_hybris_wrapper_phosh.so"
+
+# Remove old vendor swap scripts if present
 rm -f /usr/local/bin/gnome-mali-vendor-on
 rm -f /usr/local/bin/gnome-mali-vendor-off
+
+# Remove old sudo rules if present
+rm -f /etc/sudoers.d/gnome-mali-vendor
+
+# Remove old vendor json files if present
+rm -f /usr/share/gnome-mali/egl_vendor.json
+rmdir /usr/share/gnome-mali 2>/dev/null || true
 
 # -----------------------------------------------------------------------------
 # Step 6 — Restore ld.so.preload
 # -----------------------------------------------------------------------------
-echo "[6/8] Restoring ld.so.preload..."
+echo "[6/6] Restoring ld.so.preload..."
 BACKUP_PRELOAD="$BACKUP_DIR/$(echo /etc/ld.so.preload | tr '/' '_')"
 if [ -f "$BACKUP_PRELOAD" ]; then
     cp -a "$BACKUP_PRELOAD" /etc/ld.so.preload
     echo "  restored: /etc/ld.so.preload"
 else
-    # Remove only our entries
-    sed -i '\|/usr/local/lib/drm_shim.so|d' /etc/ld.so.preload 2>/dev/null || true
-    sed -i '\|/usr/local/lib/wlegl_server.so|d' /etc/ld.so.preload 2>/dev/null || true
+    sed -i '\|/usr/local/lib/drm_shim.so|d'        /etc/ld.so.preload 2>/dev/null || true
+    sed -i '\|/usr/local/lib/wlegl_server.so|d'   /etc/ld.so.preload 2>/dev/null || true
+    sed -i '\|/usr/local/lib/vulkan_x11_stub.so|d' /etc/ld.so.preload 2>/dev/null || true
     echo "  removed gnome-mali entries from /etc/ld.so.preload"
 fi
-
-# -----------------------------------------------------------------------------
-# Step 7 — Remove installed libraries
-# -----------------------------------------------------------------------------
-echo "[7/8] Removing installed libraries..."
-rm -f /usr/local/lib/drm_shim.so
-rm -f /usr/local/lib/wlegl_server.so
-rm -f "$EGL_LIB_DIR/libEGL_hybris_wrapper_gnome.so"
-rm -f "$EGL_LIB_DIR/libEGL_hybris_wrapper_phosh.so"
-rm -f "/usr/lib/aarch64-linux-gnu/libhybris/eglplatform_drmadapter.so"
-
-# Restore original system EGL wrapper if we have a backup
-BACKUP_WRAPPER="$BACKUP_DIR/$(echo "$EGL_LIB_DIR/libEGL_hybris_wrapper.so" | tr '/' '_')"
-if [ -f "$BACKUP_WRAPPER" ]; then
-    cp -a "$BACKUP_WRAPPER" "$EGL_LIB_DIR/libEGL_hybris_wrapper.so"
-    echo "  restored: $EGL_LIB_DIR/libEGL_hybris_wrapper.so"
-fi
-
-# Remove vendor json files
-rm -f /usr/share/gnome-mali/egl_vendor.json
-rmdir /usr/share/gnome-mali 2>/dev/null || true
-
-# Restore vendor dir .real files used by our scripts (don't remove the originals)
-rm -f "$VENDOR_DIR/05_hybris_wrapper.json"
-
-# Remove sudo rules
-echo "[8/8] Removing sudo rules..."
-restore_or_remove /etc/sudoers.d/gnome-mali-vendor
 
 # -----------------------------------------------------------------------------
 # Clean up state
@@ -147,5 +132,5 @@ echo ""
 echo "=== Uninstallation complete! ==="
 echo ""
 echo "GNOME Mali has been removed. Phosh is now the only session."
-echo "Backups are preserved at: $BACKUP_DIR"
+echo "Backups preserved at: $BACKUP_DIR"
 echo "Remove them manually with: sudo rm -rf $BACKUP_DIR"

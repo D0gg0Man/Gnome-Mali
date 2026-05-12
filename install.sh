@@ -6,11 +6,11 @@
 # Usage: sudo ./install-gnome-mali.sh
 #
 # Required files (same directory as this script):
-#   libEGL_hybris_wrapper_gnome.so
-#   libEGL_hybris_wrapper_phosh.so
-#   eglplatform_drmadapter.so
-#   drm_shim.so
-#   wlegl_server.so
+#   libEGL_libhybris.so.0.0.0   — patched libhybris EGL (GBM→drmadapter routing)
+#   eglplatform_drmadapter.so   — hybris EGL platform (HWC2 init + present)
+#   drm_shim.so                 — DRM ioctl interceptor for mutter KMS
+#   wlegl_server.so             — Wayland EGL server
+#   vulkan_x11_stub.so          — stub for missing X11 Vulkan symbols in GTK4
 # =============================================================================
 
 set -e
@@ -18,7 +18,6 @@ set -e
 INSTALL_DIR="$(dirname "$(readlink -f "$0")")"
 EGL_LIB_DIR="/usr/lib/aarch64-linux-gnu"
 HYBRIS_PLATFORM_DIR="/usr/lib/aarch64-linux-gnu/libhybris"
-VENDOR_DIR="/usr/share/glvnd/egl_vendor.d"
 BACKUP_DIR="/var/lib/gnome-mali/backups"
 STATE_FILE="/var/lib/gnome-mali/installed"
 
@@ -34,11 +33,11 @@ fi
 # Verify required files
 # -----------------------------------------------------------------------------
 REQUIRED=(
-    libEGL_hybris_wrapper_gnome.so
-    libEGL_hybris_wrapper_phosh.so
+    libEGL_libhybris.so.0.0.0
     eglplatform_drmadapter.so
     drm_shim.so
     wlegl_server.so
+    vulkan_x11_stub.so
 )
 
 for f in "${REQUIRED[@]}"; do
@@ -63,50 +62,45 @@ backup() {
 }
 
 # -----------------------------------------------------------------------------
-# Step 1 — EGL wrapper libraries
+# Step 1 — Patched libhybris EGL
+# Adds EGL_PLATFORM_GBM_KHR routing to drmadapter platform,
+# and GBM pixel format fix in eglGetConfigAttrib.
 # -----------------------------------------------------------------------------
-echo "[1/9] Installing EGL wrapper libraries..."
-backup "$EGL_LIB_DIR/libEGL_hybris_wrapper.so"
+echo "[1/7] Installing patched libhybris EGL..."
+backup "$EGL_LIB_DIR/libEGL_libhybris.so.0.0.0"
 
-cp "$INSTALL_DIR/libEGL_hybris_wrapper_gnome.so"  /tmp/_gnome_wrapper.so
-mv /tmp/_gnome_wrapper.so "$EGL_LIB_DIR/libEGL_hybris_wrapper_gnome.so"
-chown root:root "$EGL_LIB_DIR/libEGL_hybris_wrapper_gnome.so"
-chmod 755 "$EGL_LIB_DIR/libEGL_hybris_wrapper_gnome.so"
-
-cp "$INSTALL_DIR/libEGL_hybris_wrapper_phosh.so"  /tmp/_phosh_wrapper.so
-mv /tmp/_phosh_wrapper.so "$EGL_LIB_DIR/libEGL_hybris_wrapper_phosh.so"
-chown root:root "$EGL_LIB_DIR/libEGL_hybris_wrapper_phosh.so"
-chmod 755 "$EGL_LIB_DIR/libEGL_hybris_wrapper_phosh.so"
-
-# Ensure phosh wrapper is the active system wrapper (safe default)
-cp "$EGL_LIB_DIR/libEGL_hybris_wrapper_phosh.so" /tmp/_active_wrapper.so
-mv /tmp/_active_wrapper.so "$EGL_LIB_DIR/libEGL_hybris_wrapper.so"
-chown root:root "$EGL_LIB_DIR/libEGL_hybris_wrapper.so"
-chmod 755 "$EGL_LIB_DIR/libEGL_hybris_wrapper.so"
+cp "$INSTALL_DIR/libEGL_libhybris.so.0.0.0" /tmp/_libhybris_egl.so
+mv /tmp/_libhybris_egl.so "$EGL_LIB_DIR/libEGL_libhybris.so.0.0.0"
+chown root:root "$EGL_LIB_DIR/libEGL_libhybris.so.0.0.0"
+chmod 755 "$EGL_LIB_DIR/libEGL_libhybris.so.0.0.0"
+ldconfig
 
 # -----------------------------------------------------------------------------
-# Step 2 — Hybris EGL platform + shim libraries
+# Step 2 — drmadapter hybris EGL platform + shim libraries
 # -----------------------------------------------------------------------------
-echo "[2/9] Installing hybris platform and shim libraries..."
+echo "[2/7] Installing drmadapter platform and shim libraries..."
 backup /usr/local/lib/drm_shim.so
 backup /usr/local/lib/wlegl_server.so
+backup /usr/local/lib/vulkan_x11_stub.so
 
-# drmadapter hybris EGL platform — handles HWC2 init and present
 mkdir -p "$HYBRIS_PLATFORM_DIR"
 cp "$INSTALL_DIR/eglplatform_drmadapter.so" /tmp/_drmadapter.so
 mv /tmp/_drmadapter.so "$HYBRIS_PLATFORM_DIR/eglplatform_drmadapter.so"
 chown root:root "$HYBRIS_PLATFORM_DIR/eglplatform_drmadapter.so"
 chmod 755 "$HYBRIS_PLATFORM_DIR/eglplatform_drmadapter.so"
 
-cp "$INSTALL_DIR/drm_shim.so"    /tmp/_drm_shim.so
+cp "$INSTALL_DIR/drm_shim.so"       /tmp/_drm_shim.so
 mv /tmp/_drm_shim.so    /usr/local/lib/drm_shim.so
-cp "$INSTALL_DIR/wlegl_server.so" /tmp/_wlegl.so
+cp "$INSTALL_DIR/wlegl_server.so"   /tmp/_wlegl.so
 mv /tmp/_wlegl.so       /usr/local/lib/wlegl_server.so
+cp "$INSTALL_DIR/vulkan_x11_stub.so" /tmp/_vk_stub.so
+mv /tmp/_vk_stub.so     /usr/local/lib/vulkan_x11_stub.so
 
 # -----------------------------------------------------------------------------
 # Step 3 — /etc/ld.so.preload
+# drm_shim and wlegl_server must preload into all processes
 # -----------------------------------------------------------------------------
-echo "[3/9] Configuring ld.so.preload..."
+echo "[3/7] Configuring ld.so.preload..."
 backup /etc/ld.so.preload
 
 touch /etc/ld.so.preload
@@ -114,121 +108,25 @@ grep -qxF '/usr/local/lib/drm_shim.so'    /etc/ld.so.preload || \
     echo '/usr/local/lib/drm_shim.so'    >> /etc/ld.so.preload
 grep -qxF '/usr/local/lib/wlegl_server.so' /etc/ld.so.preload || \
     echo '/usr/local/lib/wlegl_server.so' >> /etc/ld.so.preload
+grep -qxF '/usr/local/lib/vulkan_x11_stub.so' /etc/ld.so.preload || \
+    echo '/usr/local/lib/vulkan_x11_stub.so' >> /etc/ld.so.preload
 
 # -----------------------------------------------------------------------------
-# Step 4 — GLVND vendor json files
+# Step 4 — Session wrapper
+# No vendor swap needed — libhybris routes GBM to drmadapter natively
 # -----------------------------------------------------------------------------
-echo "[4/9] Configuring EGL vendor files..."
-mkdir -p /usr/share/gnome-mali
-
-backup "$VENDOR_DIR/10_libhybris.json"
-backup "$VENDOR_DIR/50_mesa.json"
-
-if [ ! -f "$VENDOR_DIR/10_libhybris.json.real" ]; then
-    [ -f "$VENDOR_DIR/10_libhybris.json" ] && \
-        cp "$VENDOR_DIR/10_libhybris.json" "$VENDOR_DIR/10_libhybris.json.real"
-fi
-if [ ! -f "$VENDOR_DIR/50_mesa.json.real" ]; then
-    [ -f "$VENDOR_DIR/50_mesa.json" ] && \
-        cp "$VENDOR_DIR/50_mesa.json" "$VENDOR_DIR/50_mesa.json.real"
-fi
-
-# Restore vendor dir to clean phosh state
-rm -f "$VENDOR_DIR/05_hybris_wrapper.json"
-rm -f "$VENDOR_DIR/10_libhybris.json"
-[ -f "$VENDOR_DIR/10_libhybris.json.real" ] && \
-    ln -sf "$VENDOR_DIR/10_libhybris.json.real" "$VENDOR_DIR/10_libhybris.json"
-rm -f "$VENDOR_DIR/50_mesa.json"
-[ -f "$VENDOR_DIR/50_mesa.json.real" ] && \
-    ln -sf "$VENDOR_DIR/50_mesa.json.real" "$VENDOR_DIR/50_mesa.json"
-
-cat > /usr/share/gnome-mali/egl_vendor.json << 'JSON'
-{
-    "file_format_version" : "1.0.0",
-    "ICD" : {
-        "library_path" : "libEGL_hybris_wrapper.so"
-    }
-}
-JSON
-
-# -----------------------------------------------------------------------------
-# Step 5 — Vendor swap scripts
-# -----------------------------------------------------------------------------
-echo "[5/9] Installing vendor swap scripts..."
-
-cat > /usr/local/bin/gnome-mali-vendor-on << 'SCRIPT'
-#!/bin/bash
-# Swap EGL vendor to GNOME Mali wrapper (called at session start)
-EGL_LIB_DIR="/usr/lib/aarch64-linux-gnu"
-VENDOR_DIR="/usr/share/glvnd/egl_vendor.d"
-LOG="/tmp/vendor-on.log"
-
-echo "$(date): vendor-on starting" >> "$LOG"
-
-cp "$EGL_LIB_DIR/libEGL_hybris_wrapper_gnome.so" /tmp/_gnome_vendor.so \
-    && echo "cp ok" >> "$LOG" \
-    || { echo "cp FAILED" >> "$LOG"; exit 1; }
-mv /tmp/_gnome_vendor.so "$EGL_LIB_DIR/libEGL_hybris_wrapper.so" \
-    && echo "mv ok" >> "$LOG" \
-    || { echo "mv FAILED" >> "$LOG"; exit 1; }
-chown root:root "$EGL_LIB_DIR/libEGL_hybris_wrapper.so"
-chmod 755 "$EGL_LIB_DIR/libEGL_hybris_wrapper.so"
-
-# Disable libhybris vendor (conflicts with our wrapper)
-rm -f "$VENDOR_DIR/10_libhybris.json"
-ln -sf /dev/null "$VENDOR_DIR/10_libhybris.json" \
-    && echo "ln ok" >> "$LOG" \
-    || echo "ln FAILED" >> "$LOG"
-
-# Keep Mesa vendor active — GLVND needs 2+ vendors to iterate the list
-rm -f "$VENDOR_DIR/50_mesa.json"
-ln -sf "$VENDOR_DIR/50_mesa.json.real" "$VENDOR_DIR/50_mesa.json" \
-    && echo "mesa ok" >> "$LOG" \
-    || echo "mesa FAILED" >> "$LOG"
-
-cat > "$VENDOR_DIR/05_hybris_wrapper.json" << 'JSON'
-{
-    "file_format_version" : "1.0.0",
-    "ICD" : {
-        "library_path" : "libEGL_hybris_wrapper.so"
-    }
-}
-JSON
-echo "json ok" >> "$LOG"
-echo "$(date): vendor-on done" >> "$LOG"
-SCRIPT
-chmod +x /usr/local/bin/gnome-mali-vendor-on
-
-cat > /usr/local/bin/gnome-mali-vendor-off << 'SCRIPT'
-#!/bin/bash
-# Restore EGL vendor to Phosh wrapper (called at session end / boot)
-EGL_LIB_DIR="/usr/lib/aarch64-linux-gnu"
-VENDOR_DIR="/usr/share/glvnd/egl_vendor.d"
-
-cp "$EGL_LIB_DIR/libEGL_hybris_wrapper_phosh.so" /tmp/_phosh_vendor.so
-mv /tmp/_phosh_vendor.so "$EGL_LIB_DIR/libEGL_hybris_wrapper.so"
-chown root:root "$EGL_LIB_DIR/libEGL_hybris_wrapper.so"
-chmod 755 "$EGL_LIB_DIR/libEGL_hybris_wrapper.so"
-
-rm -f "$VENDOR_DIR/05_hybris_wrapper.json"
-rm -f "$VENDOR_DIR/10_libhybris.json"
-[ -f "$VENDOR_DIR/10_libhybris.json.real" ] && \
-    ln -sf "$VENDOR_DIR/10_libhybris.json.real" "$VENDOR_DIR/10_libhybris.json"
-rm -f "$VENDOR_DIR/50_mesa.json"
-[ -f "$VENDOR_DIR/50_mesa.json.real" ] && \
-    ln -sf "$VENDOR_DIR/50_mesa.json.real" "$VENDOR_DIR/50_mesa.json"
-SCRIPT
-chmod +x /usr/local/bin/gnome-mali-vendor-off
-
-# -----------------------------------------------------------------------------
-# Step 6 — Session wrapper
-# -----------------------------------------------------------------------------
-echo "[6/9] Installing session wrapper..."
+echo "[4/7] Installing session wrapper..."
 backup /usr/libexec/gnome-mali-session
 
 cat > /usr/libexec/gnome-mali-session << 'SCRIPT'
 #!/bin/bash
 # GNOME Mali session launcher — called by greetd via gnome-mali.desktop
+#
+# Pipeline:
+#   mutter → libEGL_libhybris.so (patched) → eglplatform_drmadapter.so → HWC2
+#
+# No GLVND vendor wrapper or vendor swap needed.
+# libhybris routes EGL_PLATFORM_GBM_KHR directly to drmadapter platform.
 
 export GBM_BACKEND=hybris
 export GBM_BACKENDS_PATH=/usr/lib/aarch64-linux-gnu/gbm
@@ -239,36 +137,29 @@ export XDG_CURRENT_DESKTOP=GNOME
 export XDG_SESSION_DESKTOP=gnome
 export MUTTER_DEBUG_FORCE_KMS_MODE=simple
 export HYBRIS_EGLPLATFORM=drmadapter
-
-# Clear variables inherited from phrog that confuse mutter/GLVND
 unset WLR_BACKENDS WLR_HWC_SKIP_VERSION_CHECK EGL_PLATFORM
-
-# Install GNOME Mali EGL vendor
-sudo /usr/local/bin/gnome-mali-vendor-on
 
 # Start gsd-media-keys once wayland socket is ready
 (
-    for i in $(seq 1 20); do
-        [ -S "$XDG_RUNTIME_DIR/wayland-0" ] && break
+    for i in $(seq 1 40); do
+        [ -S "${XDG_RUNTIME_DIR:-/run/user/32011}/wayland-0" ] && break
         sleep 0.5
     done
     export WAYLAND_DISPLAY=wayland-0
     /usr/libexec/gsd-media-keys 2>/dev/null &
 ) &
 
-# Launch gnome-shell — clear __EGL_VENDOR_LIBRARY_FILENAMES so GLVND
-# scans the vendor directory (needs 2+ vendors to call getPlatformDisplay)
 exec env -u __EGL_VENDOR_LIBRARY_FILENAMES \
-    LD_PRELOAD="/usr/local/lib/drm_shim.so /usr/local/lib/wlegl_server.so" \
+    LD_PRELOAD="/usr/local/lib/drm_shim.so /usr/local/lib/wlegl_server.so /usr/local/lib/vulkan_x11_stub.so" \
     gnome-shell --wayland --no-x11 \
     2>&1 | tee /tmp/gnome-mali-session.log | systemd-cat -t gnome-mali
 SCRIPT
 chmod +x /usr/libexec/gnome-mali-session
 
 # -----------------------------------------------------------------------------
-# Step 7 — Wayland session desktop entry
+# Step 5 — Wayland session desktop entry
 # -----------------------------------------------------------------------------
-echo "[7/9] Installing wayland session entry..."
+echo "[5/7] Installing wayland session entry..."
 backup /usr/share/wayland-sessions/gnome-mali.desktop
 
 cat > /usr/share/wayland-sessions/gnome-mali.desktop << 'EOF'
@@ -283,52 +174,36 @@ X-GDM-SessionRegisters=true
 EOF
 
 # -----------------------------------------------------------------------------
-# Step 8 — phrog greeter wrapper + greetd config
+# Step 6 — greetd config
+# No vendor wrapper needed for phrog — libhybris patch is transparent to phosh
 # -----------------------------------------------------------------------------
-echo "[8/9] Configuring phrog greeter..."
-backup /usr/libexec/phrog-greetd-vendor-wrapper
+echo "[6/7] Configuring greetd..."
 backup /etc/greetd/phrog.toml
-
-cat > /usr/libexec/phrog-greetd-vendor-wrapper << 'SCRIPT'
-#!/bin/bash
-# Restore phosh EGL vendor before launching phrog (in case gnome-mali left it set)
-sudo /usr/local/bin/gnome-mali-vendor-off 2>/dev/null || true
-exec /usr/libexec/phrog-greetd-session-wrapper "$@"
-SCRIPT
-chmod +x /usr/libexec/phrog-greetd-vendor-wrapper
 
 cat > /etc/greetd/phrog.toml << 'EOF'
 [terminal]
 vt = 7
 
 [default_session]
-command = "/usr/libexec/phrog-greetd-vendor-wrapper"
+command = "/usr/libexec/phrog-greetd-session-wrapper"
 user = "_greetd"
 EOF
 
 # -----------------------------------------------------------------------------
-# Step 9 — sudo rules + systemd service
+# Step 7 — systemd boot service
+# Ensures clean state on boot (no-op now, kept for safety)
 # -----------------------------------------------------------------------------
-echo "[9/9] Installing sudo rules and systemd service..."
-backup /etc/sudoers.d/gnome-mali-vendor
+echo "[7/7] Installing systemd boot service..."
 
-cat > /etc/sudoers.d/gnome-mali-vendor << 'EOF'
-# Allow gnome-mali session to swap EGL vendors without password prompt
-furios  ALL=(root) NOPASSWD: /usr/local/bin/gnome-mali-vendor-on, /usr/local/bin/gnome-mali-vendor-off
-_greetd ALL=(root) NOPASSWD: /usr/local/bin/gnome-mali-vendor-off
-EOF
-chmod 440 /etc/sudoers.d/gnome-mali-vendor
-
-cat > /etc/systemd/system/gnome-mali-vendor-restore.service << 'EOF'
+cat > /etc/systemd/system/gnome-mali-boot.service << 'EOF'
 [Unit]
-Description=Restore phosh EGL vendor after gnome-mali session
+Description=GNOME Mali boot initialisation
 Before=greetd.service
 After=local-fs.target
 
 [Service]
 Type=oneshot
-ExecStart=/usr/local/bin/gnome-mali-vendor-off
-ExecStop=/usr/local/bin/gnome-mali-vendor-off
+ExecStart=/bin/true
 RemainAfterExit=yes
 
 [Install]
@@ -336,10 +211,7 @@ WantedBy=multi-user.target
 EOF
 
 systemctl daemon-reload
-systemctl enable gnome-mali-vendor-restore.service
-
-# Ensure phosh vendor is active right now
-/usr/local/bin/gnome-mali-vendor-off
+systemctl enable gnome-mali-boot.service
 
 # Record installed state
 mkdir -p /var/lib/gnome-mali
@@ -351,8 +223,9 @@ echo ""
 echo "GNOME Mali is now available in the phrog session menu."
 echo "Select 'GNOME Mali' to launch GNOME Shell with Mali GPU acceleration."
 echo ""
+echo "Pipeline: mutter → libEGL_libhybris.so (patched) → eglplatform_drmadapter.so → HWC2"
+echo ""
 echo "Session log:  /tmp/gnome-mali-session.log"
-echo "Vendor log:   /tmp/vendor-on.log"
 echo "Backups:      $BACKUP_DIR"
 echo ""
 echo "To uninstall, run: sudo ./uninstall-gnome-mali.sh"
