@@ -1,0 +1,9 @@
+#!/bin/bash
+export GBM_BACKEND=hybris
+export GBM_BACKENDS_PATH=/usr/lib/aarch64-linux-gnu/gbm
+export LD_PRELOAD="/usr/local/lib/drm_shim.so /usr/local/lib/wlegl_server.so"
+export GSK_RENDERER=gl
+export GDK_BACKEND=wayland
+export GDK_GL=gles
+export XDG_CURRENT_DESKTOP=GNOME
+exec gnome-shell --wayland --no-x11
